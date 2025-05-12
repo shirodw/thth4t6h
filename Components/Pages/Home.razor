@@ -1,0 +1,339 @@
+@page "/"
+@rendermode InteractiveServer
+@using Microsoft.AspNetCore.SignalR.Client
+@using System.ComponentModel.DataAnnotations 
+@using TicTacToeBlazor.Models
+@using TicTacToeBlazor.Hubs
+@using TicTacToeBlazor.Components.Shared
+@implements IAsyncDisposable
+@inject NavigationManager NavigationManager
+
+<PageTitle>Tic Tac Toe</PageTitle>
+
+<h1>Tic Tac Toe</h1>
+
+@switch (currentState)
+{
+    case ClientState.Connecting:
+        <p>Connecting to server...</p>
+        break;
+
+    case ClientState.EnterName:
+        <div class="mb-3">
+            <label for="playerNameInput" class="form-label">Your Name:</label>
+            <div class="d-flex">
+                <input id="playerNameInput" class="form-control" style="max-width: 300px;" @bind="playerName" @bind:event="oninput" placeholder="Enter your name" />
+                <button @onclick="HandleFindGameClick" class="btn btn-success ms-2" disabled="@IsFindGameButtonDisabled">Find Game</button>
+            </div>
+            @if (validationResults.Any())
+            {
+                <div class="text-danger mt-1" style="font-size: 0.9em;">@validationResults.First().ErrorMessage</div>
+            }
+            @if (!string.IsNullOrEmpty(errorMessage))
+            {
+                <p class="text-danger mt-2">@errorMessage</p>
+            }
+        </div>
+        break;
+
+    case ClientState.WaitingForOpponent:
+        <p>Welcome, @playerName! Waiting for an opponent...</p>
+        @if (!string.IsNullOrEmpty(statusMessage))
+        {
+             <p>@statusMessage</p>
+        }
+        break;
+
+    case ClientState.SettingBoardSize:
+        <h2>Game Found!</h2>
+        <p>Opponent: @opponentName</p>
+        <p>Your symbol: @playerSymbol</p>
+        @if (isPlayer1)
+        {
+            <p>Please choose the board size (3-10):</p>
+            <InputNumber @bind-Value="selectedBoardSize" min="3" max="10" />
+            <button class="btn btn-primary" @onclick="HandleSetBoardSize" disabled="@IsSetBoardSizeButtonDisabled">Start Game</button>
+            @if (!string.IsNullOrEmpty(statusMessage))
+            {
+                 <p class="text-danger">@statusMessage</p>
+            }
+        }
+        else
+        {
+             <p>Waiting for @player1Name to choose the board size...</p>
+        }
+        @if (!string.IsNullOrEmpty(statusMessage) && !isPlayer1)
+        {
+             <p>@statusMessage</p>
+        }
+        break;
+
+
+    case ClientState.InGame:
+        <h2>Game vs @opponentName</h2>
+        <p>Your symbol: @playerSymbol</p>
+        <p>Status: @statusMessage</p>
+        @if (currentGame != null && currentGame.Board != null)
+        {
+            <div class="@(isMyTurn ? "" : "waiting-opponent")" style="position: relative;">
+                <GameBoard Board="currentGame.Board"
+                           BoardSize="currentGame.BoardSize"
+                           IsDisabled="!isMyTurn"
+                           OnCellClick="HandleCellClick" />
+            </div>
+        }
+        else
+        {
+             <p>Loading game board...</p>
+        }
+        break;
+
+    case ClientState.GameOver:
+        <h2>Game vs @opponentName</h2>
+        <p>Your symbol: @playerSymbol</p>
+        <p>Status: @statusMessage</p>
+        @if (currentGame != null && currentGame.Board != null)
+        {
+            <div style="position: relative;">
+                <GameBoard Board="currentGame.Board"
+                           BoardSize="currentGame.BoardSize"
+                           IsDisabled="true"
+                           OnCellClick="HandleCellClick" />
+            </div>
+        }
+        else
+        {
+             <p>Game Ended.</p>
+        }
+        <hr />
+        <button class="btn btn-primary" @onclick="ResetAndFindNewGame">Find New Game</button>
+        <hr />
+        break;
+
+    case ClientState.Error:
+        <p class="text-danger">An error occurred: @errorMessage</p>
+        <p>Please refresh the page to try again.</p>
+        break;
+}
+
+<style>
+    .waiting-opponent .game-board {
+        opacity: 0.6;
+    }
+</style>
+
+
+@code {
+    // Property for player name binding and validation
+    [Required(ErrorMessage = "Please enter your name.")]
+    [StringLength(50, ErrorMessage = "Name is too long (max 50 chars).")]
+    [RegularExpression(@"^[a-zA-Z0-9_\-\s]+$", ErrorMessage = "Invalid characters in name.")]
+    public string? playerName { get; set; } // CORRECTED TO PROPERTY
+
+    // Other state fields
+    public HubConnection? hubConnection;
+    public enum ClientState { Connecting, EnterName, WaitingForOpponent, SettingBoardSize, InGame, GameOver, Error }
+    public ClientState currentState = ClientState.Connecting;
+    public string? playerSymbol;
+    public string? player1Name;
+    public string? opponentName;
+    public bool isPlayer1 = false;
+    public bool isMyTurn = false;
+    public string? gameId;
+    public GameInfo? currentGame;
+    public int selectedBoardSize = 3;
+    public string? statusMessage;
+    public string? errorMessage;
+    public List<ValidationResult> validationResults = new();
+
+    // --- Computed Properties ---
+    public bool IsFindGameButtonDisabled => hubConnection == null
+                                             || hubConnection.State != HubConnectionState.Connected
+                                             || !ValidatePlayerName(suppressMessageUpdate: true);
+    public bool IsSetBoardSizeButtonDisabled => selectedBoardSize < 3 || selectedBoardSize > 10 || currentState != ClientState.SettingBoardSize;
+
+    // --- Manual Validation ---
+    // Update via @bind:event="oninput" - removed separate HandleNameInput
+    public bool ValidatePlayerName(bool suppressMessageUpdate = false)
+    {
+        var validationContext = new ValidationContext(this) { MemberName = nameof(playerName) };
+        var currentValidationResults = new List<ValidationResult>();
+        bool isValid = Validator.TryValidateProperty(playerName, validationContext, currentValidationResults);
+
+        if (!suppressMessageUpdate)
+        {
+            validationResults = currentValidationResults;
+            errorMessage = validationResults.FirstOrDefault()?.ErrorMessage; // Update error if validation failed
+            // No need to call StateHasChanged here, it happens naturally on input/button interaction
+        }
+        return isValid;
+    }
+
+    // --- Initialization and Reset ---
+    protected override async Task OnInitializedAsync() { await InitializeSignalRAsync(); }
+
+    public async Task InitializeSignalRAsync()
+    {
+        if (hubConnection is not null && hubConnection.State != HubConnectionState.Disconnected) { await hubConnection.DisposeAsync(); hubConnection = null; }
+        var hubUriAbsolute = NavigationManager.ToAbsoluteUri("/gamehub");
+        var hubUrl = hubUriAbsolute.ToString();
+        Console.WriteLine($"InitializeSignalRAsync: Hub URL: {hubUrl}");
+        hubConnection = new HubConnectionBuilder().WithUrl(hubUrl).WithAutomaticReconnect().Build();
+
+        // --- Register Hub Event Handlers ---
+        hubConnection.On("UpdateState", async (string state) => { Console.WriteLine($"Hub Event: UpdateState received - {state}"); if (state == "Waiting") currentState = ClientState.WaitingForOpponent; await InvokeAsync(StateHasChanged); });
+        hubConnection.On<string>("Error", async (string message) => { Console.WriteLine($"Hub Event: Error received - {message}"); errorMessage = message; statusMessage = null; await InvokeAsync(StateHasChanged); });
+        hubConnection.On("NameInUse", async () => { Console.WriteLine($"Hub Event: NameInUse received"); errorMessage = "Name taken. Choose another."; currentState = ClientState.EnterName; await InvokeAsync(StateHasChanged); });
+        hubConnection.On<string, string, string, string, bool>("GameFound", async (assignedGameId, p1Name, p2Name, symbol, isP1) => { Console.WriteLine($"Hub Event: GameFound received - GameID={assignedGameId}, P1={p1Name}, P2={p2Name}, Symbol={symbol}, IsP1={isP1}"); gameId = assignedGameId; isPlayer1 = isP1; playerSymbol = symbol; player1Name = p1Name; opponentName = isPlayer1 ? p2Name : p1Name; currentState = ClientState.SettingBoardSize; currentGame = new GameInfo { GameId = assignedGameId }; statusMessage = isPlayer1 ? "Choose board size (3-10)." : $"Waiting for {p1Name} to choose size."; errorMessage = null; validationResults.Clear(); await InvokeAsync(StateHasChanged); });
+        hubConnection.On<string, int, string>("GameStarted", async (receivedGameId, size, startingPlayerName) => { Console.WriteLine($"Hub Event: GameStarted received - GameID={receivedGameId}, Size={size}, StartingPlayer={startingPlayerName}"); if (gameId == receivedGameId && (currentState == ClientState.SettingBoardSize || currentState == ClientState.GameOver)) { currentGame ??= new GameInfo { GameId = gameId }; currentGame.BoardSize = size; currentGame.Board = new string?[size, size]; statusMessage = $"{startingPlayerName}'s turn (X)"; isMyTurn = (playerSymbol == "X"); currentState = ClientState.InGame; errorMessage = null; validationResults.Clear(); await InvokeAsync(StateHasChanged); } else { Console.WriteLine($"Warning: Received GameStarted in unexpected state ({currentState})"); } });
+        hubConnection.On<int, int, string, GameStatus, string>("ReceiveMove", async (row, col, symbol, newStatus, nextPlayerName) => { Console.WriteLine($"Hub Event: ReceiveMove - ({row},{col})={symbol}, NewStatus={newStatus}, NextP={nextPlayerName}"); if (currentGame?.Board != null && row >= 0 && row < currentGame.BoardSize && col >= 0 && col < currentGame.BoardSize) { currentGame.Board[row, col] = symbol; UpdateTurnAndStatus(newStatus, nextPlayerName); await InvokeAsync(StateHasChanged); } });
+        hubConnection.On<GameStatus, string>("GameOver", async (finalStatus, winnerName) => { Console.WriteLine($"Hub Event: GameOver received - Status={finalStatus}, Winner={winnerName}"); currentState = ClientState.GameOver; isMyTurn = false; errorMessage = null; validationResults.Clear(); statusMessage = finalStatus switch { GameStatus.Player1Win => $"{winnerName} (X) wins!", GameStatus.Player2Win => $"{winnerName} (O) wins!", GameStatus.Draw => "It's a draw!", GameStatus.Aborted => statusMessage ?? "Game aborted.", _ => "Game Over" }; await InvokeAsync(StateHasChanged); });
+        hubConnection.On<string>("OpponentDisconnected", async (message) => { Console.WriteLine($"Hub Event: OpponentDisconnected received - {message}"); statusMessage = message; currentState = ClientState.GameOver; isMyTurn = false; errorMessage = null; validationResults.Clear(); await InvokeAsync(StateHasChanged); });
+
+        // --- Start Connection ---
+        try { await hubConnection.StartAsync(); Console.WriteLine($"InitializeSignalRAsync: Hub connection started: {hubConnection.ConnectionId}"); if (currentState == ClientState.Connecting) { currentState = ClientState.EnterName; } }
+        catch (Exception ex) { Console.WriteLine($"InitializeSignalRAsync: Hub connection failed for URL {hubUrl}: {ex}"); errorMessage = $"Connection failed: {ex.Message}"; currentState = ClientState.Error; }
+        await InvokeAsync(StateHasChanged);
+    }
+
+    public async Task ResetAndFindNewGame()
+    {
+        Console.WriteLine("ResetAndFindNewGame triggered.");
+        playerSymbol = null; player1Name = null; opponentName = null; isPlayer1 = false; isMyTurn = false;
+        gameId = null; currentGame = null; selectedBoardSize = 3; statusMessage = null; errorMessage = null;
+        playerName = playerName?.Trim(); // Keep name, but trim
+        validationResults.Clear();
+        currentState = ClientState.Connecting;
+        await InvokeAsync(StateHasChanged);
+        await InitializeSignalRAsync();
+    }
+
+
+    // --- Action Handlers ---
+    public async Task HandleFindGameClick()
+    {
+        Console.WriteLine("DEBUG: HandleFindGameClick executed!");
+        statusMessage = null;
+        playerName = playerName?.Trim();
+
+        // Validate manually before sending
+        if (!ValidatePlayerName())
+        {
+            await InvokeAsync(StateHasChanged); // Ensure validation message UI updates
+            return; // Stop if invalid
+        }
+        // Clear previous errors if validation passes now
+        errorMessage = null;
+        validationResults.Clear();
+        await InvokeAsync(StateHasChanged);
+
+        if (hubConnection?.State == HubConnectionState.Connected)
+        {
+            try
+            {
+                Console.WriteLine($"HandleFindGameClick: About to SendAsync for player {playerName}...");
+                await hubConnection.SendAsync("FindGame", playerName);
+                Console.WriteLine($"HandleFindGameClick: SendAsync completed.");
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"HandleFindGameClick: EXCEPTION during SendAsync: {ex}");
+                errorMessage = $"Error finding game: {ex.Message}";
+                await InvokeAsync(StateHasChanged);
+            }
+        }
+        else
+        {
+            errorMessage = "Not connected.";
+            Console.WriteLine($"HandleFindGameClick: Cannot send, not connected. State: {hubConnection?.State.ToString() ?? "Null"}");
+            await InvokeAsync(StateHasChanged);
+        }
+    }
+
+    public async Task HandleSetBoardSize()
+    {
+        // --- Restored Correct Logic ---
+        errorMessage = null;
+        statusMessage = null;
+
+        if (hubConnection != null && hubConnection.State == HubConnectionState.Connected && !string.IsNullOrEmpty(gameId) && isPlayer1)
+        {
+            if (selectedBoardSize >= 3 && selectedBoardSize <= 10)
+            {
+                try
+                {
+                    Console.WriteLine($"HandleSetBoardSize: Sending SetBoardSize for game {gameId} with size {selectedBoardSize}");
+                    await hubConnection.SendAsync("SetBoardSize", gameId, selectedBoardSize);
+                    statusMessage = "Setting up board..."; // Temporary status
+                    await InvokeAsync(StateHasChanged);
+                }
+                catch (Exception ex)
+                {
+                    errorMessage = $"Error setting board size: {ex.Message}";
+                    Console.WriteLine($"Error calling SetBoardSize: {ex}");
+                    statusMessage = $"Error setting board size: {ex.Message}";
+                    await InvokeAsync(StateHasChanged);
+                }
+            }
+            else
+            {
+                statusMessage = "Invalid board size selected.";
+                await InvokeAsync(StateHasChanged);
+            }
+        }
+        // --- End Restored Logic ---
+    }
+    public async Task HandleCellClick((int row, int col) coords)
+    {
+        // --- Restored Correct Logic ---
+        errorMessage = null;
+
+        if (hubConnection != null && hubConnection.State == HubConnectionState.Connected &&
+            currentState == ClientState.InGame && isMyTurn && !string.IsNullOrEmpty(gameId) &&
+            currentGame?.Board?[coords.row, coords.col] == null)
+        {
+            Console.WriteLine($"HandleCellClick: Sending MakeMove for game {gameId}: ({coords.row},{coords.col})");
+            try
+            {
+                await hubConnection.SendAsync("MakeMove", gameId, coords.row, coords.col);
+            }
+            catch (Exception ex)
+            {
+                errorMessage = $"Error making move: {ex.Message}";
+                Console.WriteLine($"Error calling MakeMove: {ex}");
+                await InvokeAsync(StateHasChanged);
+            }
+        }
+        else
+        {
+            Console.WriteLine($"Ignoring cell click: State={currentState}, IsMyTurn={isMyTurn}, GameId={gameId}, CellValue={currentGame?.Board?[coords.row, coords.col]}");
+            if (currentState == ClientState.InGame && !isMyTurn)
+            {
+                statusMessage = "It's not your turn.";
+                await InvokeAsync(StateHasChanged);
+            }
+            else if (currentGame?.Board?[coords.row, coords.col] != null)
+            {
+                statusMessage = "Cell already taken.";
+                await InvokeAsync(StateHasChanged);
+            }
+        }
+        // --- End Restored Logic ---
+    }
+
+    // --- Helper Methods ---
+    public void UpdateTurnAndStatus(GameStatus newStatus, string nextPlayerName)
+    {
+        if (currentGame == null) return;
+        isMyTurn = (newStatus == GameStatus.Player1Turn && playerSymbol == "X") || (newStatus == GameStatus.Player2Turn && playerSymbol == "O");
+        statusMessage = newStatus switch
+        {
+            GameStatus.Player1Turn => $"{nextPlayerName}'s turn (X)",
+            GameStatus.Player2Turn => $"{nextPlayerName}'s turn (O)",
+            _ => statusMessage // Keep current message otherwise
+        };
+    }
+
+    // --- Disposal ---
+    public async ValueTask DisposeAsync() { if (hubConnection is not null) { await hubConnection.DisposeAsync(); hubConnection = null; } GC.SuppressFinalize(this); }
+}
