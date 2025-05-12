@@ -80,7 +80,7 @@ if (!app.Environment.IsDevelopment())
 //app.UseHttpsRedirection(); // Often REMOVED when behind a reverse proxy (like Railway) that handles HTTPS termination. Test if needed.
 
 app.UseStaticFiles(); // Serve static files from wwwroot
-
+app.UseRouting();
 // Antiforgery is important for Blazor Server security
 app.UseAntiforgery();
 
