@@ -336,4 +336,37 @@
 
     // --- Disposal ---
     public async ValueTask DisposeAsync() { if (hubConnection is not null) { await hubConnection.DisposeAsync(); hubConnection = null; } GC.SuppressFinalize(this); }
+private HubConnection hubConnection;
+    private bool hubConnectionStarted = false;
+
+    protected override async Task OnInitializedAsync()
+    {
+        await InitializeSignalRAsync();
+    }
+
+    private async Task InitializeSignalRAsync()
+    {
+        hubConnection = new HubConnectionBuilder()
+            .WithUrl(NavigationManager.ToAbsoluteUri("https://thth4t6h-production.up.railway.app/gamehub"))
+            .Build();
+
+        const int maxRetries = 5;
+        for (int i = 0; i < maxRetries; i++)
+        {
+            try
+            {
+                await hubConnection.StartAsync();
+                hubConnectionStarted = true;
+                Console.WriteLine("✅ SignalR connected!");
+                return;
+            }
+            catch (HttpRequestException ex)
+            {
+                Console.WriteLine($"⚠️ Connection attempt {i + 1} failed: {ex.Message}");
+                await Task.Delay(1500);
+            }
+        }
+
+        Console.WriteLine("❌ SignalR connection failed after retries.");
+    }
 }
