@@ -175,8 +175,8 @@
     public async Task InitializeSignalRAsync()
     {
         if (hubConnection is not null && hubConnection.State != HubConnectionState.Disconnected) { await hubConnection.DisposeAsync(); hubConnection = null; }
-        var hubUriAbsolute = NavigationManager.ToAbsoluteUri("/gamehub");
-        var hubUrl = hubUriAbsolute.ToString();
+        var baseUri = NavigationManager.BaseUri.Replace("http://", "https://");
+        var hubUrl = new Uri(new Uri(baseUri), "gamehub").ToString();
         Console.WriteLine($"InitializeSignalRAsync: Hub URL: {hubUrl}");
         hubConnection = new HubConnectionBuilder().WithUrl(hubUrl).WithAutomaticReconnect().Build();
 
